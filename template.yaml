@@ -1,0 +1,304 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Amazon Connect Wisdom Loader
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 256
+    Runtime: python3.8
+  Api:
+    Cors:
+      AllowMethods: "'*'"
+      AllowHeaders: "'*'"
+      AllowOrigin: "'*'"
+Resources:
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole'
+      Policies:
+        -
+          PolicyName: ConnectIntegrationAssociations
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'connect:CreateIntegrationAssociation'
+                  - 'connect:DeleteIntegrationAssociation'
+                Resource:
+                  - '*'
+
+        -
+          PolicyName: WisdomLoad
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'wisdom:SearchContent'
+                  - 'wisdom:UpdateContent'
+                  - 'wisdom:CreateContent'
+                  - 'wisdom:DeleteContent'
+                  - 'wisdom:StartContentUpload'
+                Resource:
+                  - '*'
+        - 
+          PolicyName: BucketAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - '*'
+  
+  iobucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - wisdomLoad
+      - ProcessingLambdaPermission
+    Properties:
+      BucketName: !Join 
+        - ''
+        - - 'iobucket-'
+          - !Ref 'AWS::StackName'
+          - !Select [0, !Split ['-',!Select [2, !Split ['/', !Ref 'AWS::StackId']]]]
+      NotificationConfiguration:
+          LambdaConfigurations:
+              - Event: 's3:ObjectCreated:*'
+                Function: !GetAtt wisdomLoad.Arn
+              - Event: 's3:ObjectRemoved:*'
+                Function: !GetAtt wisdomLoad.Arn
+
+  
+  ProcessingLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref wisdomLoad
+      Principal: s3.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:aws:s3:::iobucket-'
+          - !Ref 'AWS::StackName'
+          - !Select [0, !Split ['-',!Select [2, !Split ['/', !Ref 'AWS::StackId']]]]
+      SourceAccount: !Ref AWS::AccountId
+
+  AxiosLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: axioslayer
+      Description: Axios library.
+      ContentUri: 'axios-layer/nodejs/'
+      CompatibleRuntimes:
+        - nodejs16.x
+        - nodejs14.x
+    Metadata:
+      BuildMethod: nodejs14.x
+  wisdomLoad:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      CodeUri: wisdom-load/
+      Handler: index.handler
+      Runtime: nodejs14.x
+      Role: !GetAtt 
+        - LambdaRole
+        - Arn
+      Layers:
+        - !Ref AxiosLayer
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: "Replace with your Instance ARN"
+          
+          
+  presignFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      CodeUri: presigner/
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt 
+        - LambdaRole
+        - Arn
+      Environment:
+        Variables:
+          BUCKET: !Ref iobucket
+  
+  presignAPI:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: !Join 
+        - ''
+        - - !Ref 'AWS::StackName'
+          - '-presign'
+      Description: Sign files on request.
+      FailOnWarnings: true
+  
+  SignerLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:invokeFunction'
+      FunctionName: !GetAtt 
+        - presignFunction
+        - Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:aws:execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref presignAPI
+          - /*
+  
+  ApiGatewayCloudWatchLogsRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ApiGatewayLogsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:DescribeLogGroups'
+                  - 'logs:DescribeLogStreams'
+                  - 'logs:PutLogEvents'
+                  - 'logs:GetLogEvents'
+                  - 'logs:FilterLogEvents'
+                Resource: '*'
+  ApiGatewayAccount:
+    Type: 'AWS::ApiGateway::Account'
+    Properties:
+      CloudWatchRoleArn: !GetAtt 
+        - ApiGatewayCloudWatchLogsRole
+        - Arn
+  ApiStage:
+    DependsOn:
+      - ApiGatewayAccount
+      - PresignRequest
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      DeploymentId: !Ref ApiDeployment
+      MethodSettings:
+        - DataTraceEnabled: true
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          ResourcePath: /*
+      RestApiId: !Ref presignAPI
+      StageName: prod
+  
+  ApiDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn:
+      - PresignRequest
+    Properties:
+      RestApiId: !Ref presignAPI
+      StageName: dev
+
+  PresignResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref presignAPI
+      ParentId: !GetAtt 
+        - presignAPI
+        - RootResourceId
+      PathPart: presign
+      
+  PresignRequest:
+    DependsOn: SignerLambdaPermission
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: GET
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Join 
+          - ''
+          - - 'arn:aws:apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - presignFunction
+              - Arn
+            - /invocations
+        IntegrationResponses:
+          - StatusCode: 200
+        PassthroughBehavior: 'WHEN_NO_TEMPLATES'
+        RequestTemplates:
+          application/json: !Join 
+            - ""
+            - - "#set($allParams = $input.params())\n"
+              - "{\n"
+              - "\"body-json\" : $input.json('$'),\n"
+              - "\"params\" : {\n"
+              - "#foreach($type in $allParams.keySet())\n"
+              - "    #set($params = $allParams.get($type))\n"
+              - "\"$type\" : {\n"
+              - "    #foreach($paramName in $params.keySet())\n"
+              - "    \"$paramName\" : \"$util.escapeJavaScript($params.get($paramName))\"\n"
+              - "        #if($foreach.hasNext),#end\n"
+              - "    #end\n"
+              - "}\n"
+              - "    #if($foreach.hasNext),#end\n"
+              - "#end\n"
+              - "}\n"
+              - "}"
+
+      RequestParameters:
+        method.request.querystring.bucketname: false
+        method.request.querystring.ctype: false
+        method.request.querystring.filename: false
+      ResourceId: !Ref PresignResource
+      RestApiId: !Ref presignAPI
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels: 
+            application/json: 'Empty'
+  
+Outputs:
+  iobucket:
+    Description: "Bucket for content file loading"
+    Value: !Ref iobucket
+  presignAPI:
+    Description: "API Id"
+    Value: !Ref presignAPI
+  scriptcommand:
+    Description: "Issue the following command to upload files"
+    Value: !Join
+      - ""
+      - - "./s3upload.sh -b "
+        - !Ref iobucket 
+        - " -r "
+        - !Ref "AWS::Region"
+        - " -a "
+        - !Ref presignAPI
+        - " -f <FILENAME>"

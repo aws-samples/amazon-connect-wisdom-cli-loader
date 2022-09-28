@@ -1,0 +1,8 @@
+{
+        "name": "wisdom-loader",
+        "version": "0.1.0",
+        "description": "Wisdom Loading function",
+        "dependencies": {
+                "axios": "^0.27.2"
+        }
+}
