@@ -208,7 +208,7 @@ Resources:
     Properties:
       DeploymentId: !Ref ApiDeployment
       MethodSettings:
-        - DataTraceEnabled: true
+        - DataTraceEnabled: false
           HttpMethod: '*'
           LoggingLevel: INFO
           ResourcePath: /*
