@@ -39,19 +39,32 @@ if ! [ -x "$(command -v jq)" ]; then
   exit 1
 fi
 
-assistArn=($(aws wisdom create-assistant --name $assistName --type AGENT| jq -r '.assistant|.assistantArn'))
-echo "Assistant ARN: $assistArn"
-kbArn=($(aws wisdom create-knowledge-base --name $assistName --knowledge-base-type CUSTOM| jq -r '.knowledgeBase|.knowledgeBaseArn'))
-echo "KB ARN $kbArn"
-assistAssoc=($(aws connect create-integration-association --instance-id $connectId --integration-type WISDOM_ASSISTANT --integration-arn $assistArn| jq -r '.IntegrationAssociationArn'))
+assistantDetails=$(aws wisdom create-assistant --name $assistName --type AGENT| jq -r '.assistant|{assistantId,assistantArn}')
+
+assistantId=$(echo ${assistantDetails}|jq -r '.assistantId')
+assistantArn=$(echo ${assistantDetails}|jq -r '.assistantArn')
+echo "Assistant Id: $assistantId"
+
+kbDetails=$(aws wisdom create-knowledge-base --name $assistName --knowledge-base-type CUSTOM| jq -r '.knowledgeBase|{knowledgeBaseId,knowledgeBaseArn}')
+kbId=$(echo ${kbDetails}|jq -r '.knowledgeBaseId')
+kbArn=$(echo ${kbDetails}|jq -r '.knowledgeBaseArn')
+echo "KB Id: $kbId"
+
+association=($(aws wisdom create-assistant-association --association-type KNOWLEDGE_BASE --assistant-id ${assistantId} --association knowledgeBaseId=${kbId}| jq -r '.'))
+  
+assistAssoc=($(aws connect create-integration-association --instance-id $connectId --integration-type WISDOM_ASSISTANT --integration-arn $assistantArn| jq -r '.IntegrationAssociationArn'))
 echo "Assistant association ARN : $assistAssoc"
 kbAssoc=($(aws connect create-integration-association --instance-id $connectId --integration-type WISDOM_KNOWLEDGE_BASE --integration-arn $kbArn| jq -r '.IntegrationAssociationArn'))
 echo "KB association ARN : $kbAssoc"
 
 unset assistName
 unset connectId
-unset assistArn
+unset kbDetails
+unset assistantId
+unset assistantArn
+unset association
 unset kbArn
+unset kbId
 unset kbAssoc
 unset assistAssoc
 
